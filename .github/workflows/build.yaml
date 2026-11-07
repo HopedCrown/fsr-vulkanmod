@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Minecraft 26.1.x needs Java 25. Change this if your project targets something else.
       - name: Set up JDK
@@ -23,8 +23,14 @@ jobs:
           distribution: temurin
           java-version: 25
 
-      - name: Set up Gradle (with caching)
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          # Pin to the version your Loom/Fabric setup needs
+          gradle-version: "9.8.1"
+
+      - name: Build with Gradle
+        run: gradle build -Pmod_version="${{ steps.version.outputs.version }}"
 
       # Works out the version: latest release tag (or 0.0.0) + "-build-<run number>"
       - name: Compute version
