@@ -1,0 +1,76 @@
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+# Needed so the workflow can create releases and tags
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Minecraft 26.1.x needs Java 25. Change this if your project targets something else.
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Set up Gradle (with caching)
+        uses: gradle/actions/setup-gradle@v4
+
+      # Works out the version: latest release tag (or 0.0.0) + "-build-<run number>"
+      - name: Compute version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Latest non-prerelease, non-draft release; empty if none exists
+          LATEST=$(gh release view --json tagName --jq .tagName 2>/dev/null || true)
+          if [ -z "$LATEST" ]; then LATEST="0.0.0"; fi
+          BASE="${LATEST#v}"          # drop a leading "v"
+          BASE="${BASE%%-build-*}"    # drop any existing -build-xx suffix
+          VERSION="${BASE}-build-${GITHUB_RUN_NUMBER}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
+      - name: Build with Gradle
+        run: |
+          chmod +x ./gradlew
+          ./gradlew build -Pmod_version="${{ steps.version.outputs.version }}"
+
+      # Collect only the remapped mod jar (skip -sources, -dev, -javadoc)
+      - name: Find mod jar
+        id: jar
+        run: |
+          JAR=$(find build/libs -maxdepth 1 -name '*.jar' \
+                  ! -name '*-sources.jar' ! -name '*-dev.jar' ! -name '*-javadoc.jar' | head -n 1)
+          echo "path=$JAR" >> "$GITHUB_OUTPUT"
+          echo "Using $JAR"
+
+      # Goes to the Actions run page
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fsr-vulkanmod-${{ steps.version.outputs.version }}
+          path: ${{ steps.jar.outputs.path }}
+          if-no-files-found: error
+
+      # Goes to the Releases page
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.version }}" \
+            "${{ steps.jar.outputs.path }}" \
+            --target "${{ github.sha }}" \
+            --title "${{ steps.version.outputs.version }}" \
+            --generate-notes \
+            --prerelease
