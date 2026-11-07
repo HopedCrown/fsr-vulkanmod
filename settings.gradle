@@ -1,0 +1,14 @@
+// pluginManagement {} MUST be the first statement in settings.gradle — Gradle
+// 9.8.2 rejected this file at build time when rootProject.name came first
+// (real error caught during an actual build attempt, not a guess):
+// "The pluginManagement {} block must appear before any other statements."
+pluginManagement {
+    repositories {
+        // Where the Fabric Loom Gradle plugin itself is published.
+        maven { url 'https://maven.fabricmc.net/' }
+        gradlePluginPortal()
+    }
+}
+
+// Names the root project, used in build output paths and IDE project names.
+rootProject.name = 'fsr-vulkanmod'

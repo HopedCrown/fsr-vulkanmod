@@ -1,0 +1,71 @@
+// Applies the Fabric Loom plugin, which knows how to deobfuscate Minecraft
+// and wire up a Fabric mod project.
+plugins {
+    id 'fabric-loom' version '1.9-SNAPSHOT'
+    // 'java-library' lets us expose some classes to other mods if ever needed.
+    id 'java-library'
+}
+
+// The Java version Minecraft 26.1.2 / Fabric currently require.
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+// Pulls version numbers out of gradle.properties instead of hardcoding them here.
+version = project.mod_version
+group = project.maven_group
+
+repositories {
+    // Where VulkanMod's and Beryl's *release jars* (not source) are published,
+    // so Gradle can resolve VulkanMod as a compile/runtime dependency.
+    maven { url 'https://api.modrinth.com/maven' }
+    // Needed for YACL (Yet Another Config Lib), used for the config screen.
+    maven { url 'https://maven.isxander.dev/releases' }
+    // Mod Menu's maven, only used if the optional Mod Menu integration is built.
+    maven { url 'https://maven.terraformersmc.com/releases' }
+}
+
+dependencies {
+    // The base Minecraft jar, deobfuscated by Loom.
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    // Yarn mappings translate Minecraft's obfuscated names to readable ones.
+    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    // The Fabric mod loader itself.
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    // Fabric API, for lifecycle/render events we hook into instead of raw mixins
+    // wherever possible.
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+    // VulkanMod is the renderer we attach to. It is NOT bundled into our jar;
+    // 'modImplementation' here means "compile against it, require it at runtime,
+    // but don't ship its code" — required because it's LGPL-3.0 and a separate mod.
+    modImplementation "maven.modrinth:vulkanmod:${project.vulkanmod_version}"
+
+    // YACL supplies the config screen widgets (sliders, toggles, categories).
+    modImplementation "dev.isxander:yet-another-config-lib-fabric:${project.yacl_version}"
+
+    // Beryl is only used at runtime via a soft FabricLoader.isModLoaded() check —
+    // we never compile against its classes, so there is no dependency entry for it.
+    // This is intentional: Beryl is ARR-licensed and we must not touch its source
+    // or its compiled API surface, only detect its mod id.
+
+    // Mod Menu is optional; 'modCompileOnly' means our ModMenuIntegration class
+    // only needs it to compile, and Mod Menu is not required to run the mod.
+    modCompileOnly "com.terraformersmc:modmenu:${project.modmenu_version}"
+}
+
+processResources {
+    // Substitutes ${version} inside fabric.mod.json with the real mod_version.
+    inputs.property "version", project.version
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    // Fail fast on bad encoding instead of silently mangling comments/strings.
+    options.encoding = "UTF-8"
+    // Targets Java 21 bytecode to match Minecraft 26.1.2's runtime.
+    options.release = 21
+}

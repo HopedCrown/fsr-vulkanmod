@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "net.fsrvulkanmod.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "RendererMixin",
+    "InternalResolutionMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

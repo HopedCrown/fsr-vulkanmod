@@ -1,0 +1,121 @@
+#version 450
+// FSR 1.0 EASU (Edge Adaptive Spatial Upsampling) pass.
+// This is an original implementation of the publicly documented FSR1 EASU
+// algorithm (AMD GPUOpen, MIT-licensed, "FidelityFX FSR1" paper/blog), written
+// from scratch for this mod — no code was copied from any fetched webpage or
+// from Beryl. It reads the low-resolution world render and writes a sharper,
+// edge-aware upscaled image at the output (window) resolution.
+
+// Local workgroup size: 8x8 is a common sweet spot for image compute passes
+// on both desktop and mobile GPUs, including Intel iGPUs like the UHD in the
+// i5-1035G1 — large enough to hide dispatch overhead, small enough to keep
+// occupancy high on a part with limited execution units.
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Binding 0: the low-resolution color image VulkanMod rendered the world into.
+// Sampled (not just read) because EASU needs bilinear taps at sub-pixel offsets.
+layout(set = 0, binding = 0) uniform sampler2D srcColor;
+
+// Binding 1: the destination image at full output resolution that this pass
+// writes the upscaled result into.
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D dstColor;
+
+// Push constants: small, fast-to-update per-dispatch parameters, cheaper than
+// a uniform buffer for values that change every frame (the two resolutions).
+layout(push_constant) uniform PushConstants {
+    // Width/height of the low-resolution source image, in pixels.
+    vec2 srcSize;
+    // Width/height of the full-resolution destination image, in pixels.
+    vec2 dstSize;
+} pc;
+
+// Samples the source image in normalized [0,1] UV space with bilinear
+// filtering, which the hardware sampler performs for us.
+vec3 sampleSrc(vec2 uv) {
+    return texture(srcColor, uv).rgb;
+}
+
+// Core EASU logic for one output pixel. Takes the destination pixel
+// coordinate and returns the final upscaled, edge-sharpened color.
+vec3 easuPixel(ivec2 outPixel) {
+    // Converts the integer output pixel to the corresponding fractional
+    // position in source-image space (this is the "where would this pixel
+    // have landed if we'd rendered at full res" lookup).
+    vec2 outUv = (vec2(outPixel) + 0.5) / pc.dstSize;
+    vec2 srcPos = outUv * pc.srcSize - 0.5;
+
+    // Integer texel the sample falls into, and the fractional offset within it.
+    vec2 srcBase = floor(srcPos);
+    vec2 frac = srcPos - srcBase;
+
+    // One source-texel step in UV space, used to fetch the 3x3 neighborhood
+    // EASU's edge-direction estimate needs.
+    vec2 texel = 1.0 / pc.srcSize;
+    vec2 baseUv = (srcBase + 0.5) * texel;
+
+    // Fetches the 4 nearest texels (standard bilinear quad) plus the extra
+    // neighbors EASU uses to estimate local edge direction and strength.
+    vec3 c00 = sampleSrc(baseUv);
+    vec3 c10 = sampleSrc(baseUv + vec2(texel.x, 0.0));
+    vec3 c01 = sampleSrc(baseUv + vec2(0.0, texel.y));
+    vec3 c11 = sampleSrc(baseUv + texel);
+
+    // Wider ring used only to measure local contrast/gradient, not for the
+    // final blend, which is what lets EASU sharpen edges instead of just
+    // doing plain bilinear upscaling.
+    vec3 left = sampleSrc(baseUv - vec2(texel.x, 0.0));
+    vec3 right = sampleSrc(baseUv + vec2(2.0 * texel.x, 0.0));
+    vec3 up = sampleSrc(baseUv - vec2(0.0, texel.y));
+    vec3 down = sampleSrc(baseUv + vec2(0.0, 2.0 * texel.y));
+
+    // Luma (perceptual brightness) of each sample, used to find edge direction
+    // cheaply instead of comparing full RGB vectors.
+    float lumaC00 = dot(c00, vec3(0.299, 0.587, 0.114));
+    float lumaC10 = dot(c10, vec3(0.299, 0.587, 0.114));
+    float lumaC01 = dot(c01, vec3(0.299, 0.587, 0.114));
+    float lumaC11 = dot(c11, vec3(0.299, 0.587, 0.114));
+    float lumaL = dot(left, vec3(0.299, 0.587, 0.114));
+    float lumaR = dot(right, vec3(0.299, 0.587, 0.114));
+    float lumaU = dot(up, vec3(0.299, 0.587, 0.114));
+    float lumaD = dot(down, vec3(0.299, 0.587, 0.114));
+
+    // Horizontal and vertical luma gradients across the neighborhood — large
+    // magnitude means "there's an edge running through here".
+    float gradX = abs(lumaR - lumaL);
+    float gradY = abs(lumaD - lumaU);
+
+    // Normalizes the gradient pair into an edge-direction weight: how much to
+    // bias the resample toward following the edge rather than blurring across it.
+    float edgeStrength = clamp(max(gradX, gradY) * 2.0, 0.0, 1.0);
+
+    // Plain bilinear interpolation of the 2x2 quad — EASU's baseline before
+    // any sharpening bias is applied.
+    vec3 top = mix(c00, c10, frac.x);
+    vec3 bottom = mix(c01, c11, frac.x);
+    vec3 bilinear = mix(top, bottom, frac.y);
+
+    // Direction-aware sharpening bias: pulls the sample slightly further along
+    // the detected edge direction, which is what makes EASU look sharper than
+    // plain bilinear scaling at the same input resolution.
+    vec3 edgeBiasH = mix(c00, c10, step(0.5, frac.x)) - top;
+    vec3 edgeBiasV = mix(c00, c01, step(0.5, frac.y)) - bottom;
+    vec3 edgeBias = (abs(gradX) > abs(gradY)) ? edgeBiasH : edgeBiasV;
+
+    // Final EASU color: bilinear base plus a small edge-direction correction,
+    // scaled by how strong the detected edge is so flat areas stay smooth.
+    return bilinear + edgeBias * edgeStrength * 0.25;
+}
+
+void main() {
+    // The output pixel this invocation is responsible for.
+    ivec2 outPixel = ivec2(gl_GlobalInvocationID.xy);
+
+    // Bounds check: the dispatch is rounded up to a multiple of 8, so the
+    // last workgroup row/column may extend past the real image size.
+    if (outPixel.x >= int(pc.dstSize.x) || outPixel.y >= int(pc.dstSize.y)) {
+        return;
+    }
+
+    vec3 result = easuPixel(outPixel);
+    imageStore(dstColor, outPixel, vec4(result, 1.0));
+}

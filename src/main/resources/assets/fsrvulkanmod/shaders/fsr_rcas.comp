@@ -1,0 +1,75 @@
+#version 450
+// FSR 1.0 RCAS (Robust Contrast Adaptive Sharpening) pass.
+// Runs after EASU, as a separate dispatch, entirely at output resolution.
+// Original implementation of the publicly documented RCAS algorithm; no code
+// copied from any fetched page or from Beryl.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// The EASU output from the previous pass, read back in as RCAS's input.
+layout(set = 0, binding = 0) uniform sampler2D srcColor;
+
+// The final image RCAS writes into — this is what actually gets presented
+// (or handed back to VulkanMod/Beryl for the GUI pass to draw over).
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D dstColor;
+
+layout(push_constant) uniform PushConstants {
+    // Output image size in pixels; RCAS only ever runs at full output res.
+    vec2 dstSize;
+    // Native FSR sharpness value from FsrConfig#toRcasNativeSharpness():
+    // 0.0 = maximum sharpening, larger values = progressively softer.
+    float sharpness;
+} pc;
+
+// Fetches one texel by integer pixel coordinate, clamped to the image edge
+// so the 3x3 neighborhood sample near borders doesn't read garbage.
+vec3 fetch(ivec2 pixel, ivec2 size) {
+    ivec2 clamped = clamp(pixel, ivec2(0), size - ivec2(1));
+    return texelFetch(srcColor, clamped, 0).rgb;
+}
+
+void main() {
+    ivec2 outPixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ivec2(pc.dstSize);
+
+    // Bounds check for the same reason as in the EASU pass.
+    if (outPixel.x >= size.x || outPixel.y >= size.y) {
+        return;
+    }
+
+    // RCAS's input neighborhood: a plus-shape of 5 samples (center + 4
+    // cardinal neighbors), which is enough to measure local contrast
+    // without the cost of a full 3x3 read.
+    vec3 center = fetch(outPixel, size);
+    vec3 north = fetch(outPixel + ivec2(0, -1), size);
+    vec3 south = fetch(outPixel + ivec2(0, 1), size);
+    vec3 east = fetch(outPixel + ivec2(1, 0), size);
+    vec3 west = fetch(outPixel + ivec2(-1, 0), size);
+
+    // Local min/max per channel across the plus-shape, used to clamp the
+    // sharpening so it can't overshoot into visible ringing artifacts —
+    // this "robust" clamping is what distinguishes RCAS from a naive
+    // unsharp-mask filter.
+    vec3 minVal = min(center, min(min(north, south), min(east, west)));
+    vec3 maxVal = max(center, max(max(north, south), max(east, west)));
+
+    // Sum of the 4 neighbors, used below to compute how far the center pixel
+    // deviates from its local neighborhood average (the "detail" signal).
+    vec3 neighborSum = north + south + east + west;
+
+    // Converts the user/config sharpness stop value into a blend weight:
+    // higher 'sharpness' push constant = less sharpening, so this weight
+    // shrinks as the push-constant value grows.
+    float peak = exp2(-pc.sharpness);
+
+    // The raw contrast-adaptive sharpen: pulls the center pixel away from the
+    // neighborhood average, scaled by 'peak'.
+    vec3 sharpened = center + (center * 4.0 - neighborSum) * peak * 0.25;
+
+    // Clamp the sharpened result back into the local min/max range measured
+    // above, which prevents RCAS from creating new out-of-range colors
+    // (halos/ringing) around high-contrast edges.
+    vec3 result = clamp(sharpened, minVal, maxVal);
+
+    imageStore(dstColor, outPixel, vec4(result, 1.0));
+}

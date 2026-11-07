@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "fsr_vulkanmod",
+  "version": "${version}",
+  "name": "FSR Upscaler for VulkanMod",
+  "description": "Adds an AMD FSR 1.0 (EASU + RCAS) spatial upscaler to VulkanMod, with a YACL config screen, a Video Settings entry, and Beryl-by-default upscaling.",
+  "authors": ["you"],
+  "license": "MIT",
+  "icon": "assets/fsrvulkanmod/icon.png",
+  "environment": "client",
+
+  "entrypoints": {
+    "client": [
+      "net.fsrvulkanmod.FsrVulkanModClient"
+    ],
+
+    "modmenu": [
+      "net.fsrvulkanmod.config.FsrModMenuIntegration"
+    ]
+  },
+
+  "mixins": [
+    "fsrvulkanmod.mixins.json"
+  ],
+
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "26.1.2",
+    "vulkanmod": "*",
+    "yet_another_config_lib_v3": "*"
+  },
+
+  "suggests": {
+    "beryl": "*",
+    "modmenu": "*"
+  }
+}
